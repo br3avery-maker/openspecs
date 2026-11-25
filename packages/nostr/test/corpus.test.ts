@@ -110,8 +110,7 @@ describe("syncSpecs", () => {
       docs
         .filter(
           (e) =>
-            e.created_at >= (filter?.since ?? 0) &&
-            e.created_at <= (filter?.until ?? Infinity),
+            e.created_at >= (filter?.since ?? 0) && e.created_at <= (filter?.until ?? Infinity),
         )
         .slice(0, Math.min(2, filter?.limit ?? 2));
     const pool = {
