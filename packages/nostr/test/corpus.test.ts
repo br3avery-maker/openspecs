@@ -71,10 +71,7 @@ afterAll(async () => {
 
 describe("syncSpecs", () => {
   it("widens a repeated full page when documents share a second", async () => {
-    const docs = [
-      ...Array.from({ length: 5 }, (_, i) => document(300 + i, 20)),
-      document(305, 10),
-    ];
+    const docs = [...Array.from({ length: 5 }, (_, i) => document(300 + i, 20)), document(305, 10)];
     const relay = await startRelay(docs);
     try {
       const { specs, cursors } = await syncSpecs({
@@ -108,20 +105,27 @@ describe("syncSpecs", () => {
     ].sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id));
     const url = "wss://fixture.example/";
     // Deterministic relay with a hard cap of two, regardless of requested limit.
+    type PageFilter = { since?: number; until?: number; limit?: number };
+    const page = (filter?: PageFilter) =>
+      docs
+        .filter(
+          (e) =>
+            e.created_at >= (filter?.since ?? 0) &&
+            e.created_at <= (filter?.until ?? Infinity),
+        )
+        .slice(0, Math.min(2, filter?.limit ?? 2));
     const pool = {
+      querySync: async (_relays: string[], filter: PageFilter) => page(filter),
       ensureRelay: async () => ({
         subscribe: (
-          [filter]: { since?: number; until?: number; limit?: number }[],
+          [filter]: PageFilter[],
           handlers: {
             onevent: (event: (typeof docs)[number]) => void;
             oneose: () => void;
           },
         ) => {
           queueMicrotask(() => {
-            for (const event of docs
-              .filter((e) => e.created_at >= (filter?.since ?? 0) &&
-                e.created_at <= (filter?.until ?? Infinity))
-              .slice(0, Math.min(2, filter?.limit ?? 2))) {
+            for (const event of page(filter)) {
               handlers.onevent(event);
             }
             handlers.oneose();

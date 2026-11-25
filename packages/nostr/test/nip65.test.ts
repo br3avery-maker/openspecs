@@ -1,6 +1,6 @@
 import { finalizeEvent, generateSecretKey, verifyEvent } from "nostr-tools/pure";
-import { newestEvent } from "../src/event";
 import { describe, expect, it } from "vitest";
+import { newestEvent } from "../src/event";
 import {
   buildRelayList,
   MAX_RELAYS_PER_AUTHOR,
@@ -85,14 +85,14 @@ describe("selectRelayLists", () => {
   it("selects the lowest id on equal timestamps, regardless of arrival order", () => {
     const key = generateSecretKey();
     const revisions = ["wss://a.example", "wss://b.example"].map((url) =>
-      finalizeEvent(
-        { ...buildRelayList([url]), created_at: 1_700_000_000 },
-        key,
-      ),
+      finalizeEvent({ ...buildRelayList([url]), created_at: 1_700_000_000 }, key),
     );
     const [low, high] = revisions.sort((a, b) => a.id.localeCompare(b.id));
     if (!low || !high) throw new Error("missing revisions");
-    for (const events of [[low, high], [high, low]]) {
+    for (const events of [
+      [low, high],
+      [high, low],
+    ]) {
       expect(selectRelayLists(events).get(low.pubkey)).toEqual(parseRelayList(low));
       expect(newestEvent(events, low.pubkey, RELAY_LIST_KIND)?.id).toBe(low.id);
     }
