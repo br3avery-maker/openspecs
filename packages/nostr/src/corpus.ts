@@ -1,6 +1,6 @@
 import type { Filter } from "nostr-tools/filter";
 import { type NostrEvent, SPEC_KIND } from "./event";
-import { queryRelays, type RelayOptions, relaySet } from "./pool";
+import { queryRelayPage, type RelayOptions, relaySet } from "./pool";
 import { latestByCoordinate, READ_RELAYS } from "./relay";
 import { parseSpec, type Spec } from "./spec";
 
@@ -39,8 +39,8 @@ type RelaySync = { events: NostrEvent[]; cursor: RelayCursor };
 /**
  * A relay answers a `limit` with whatever it feels like and never says it capped
  * the page, so the only way to read all of it is to walk backwards with `until`
- * until a page brings nothing new. A short page cannot end the walk: that is
- * exactly what a cap looks like from here.
+ * until an empty completed page (or the lower bound). A short or repeated
+ * page alone cannot end the walk: that is what a cap looks like from here.
  *
  * The walk is per relay because one shared cursor would be wrong: relays hold
  * different subsets, and moving `until` down to the deepest one skips everything
@@ -49,9 +49,9 @@ type RelaySync = { events: NostrEvent[]; cursor: RelayCursor };
 const syncRelay = async (relay: string, options: SyncOptions): Promise<RelaySync> => {
   const known = options.cursors?.[relay];
   const since = known?.exhausted && known.newestAt > 0 ? known.newestAt : undefined;
-  const pageSize = options.pageSize ?? PAGE_SIZE;
+  const maxEvents = Math.max(1, options.maxEvents ?? MAX_EVENTS);
+  const pageSize = Math.min(maxEvents, Math.max(1, options.pageSize ?? PAGE_SIZE));
   const maxPages = options.maxPages ?? MAX_PAGES;
-  const maxEvents = options.maxEvents ?? MAX_EVENTS;
 
   const seen = new Map<string, NostrEvent>();
   // Carried over, so a relay that answers nothing this time keeps the watermark
@@ -59,29 +59,59 @@ const syncRelay = async (relay: string, options: SyncOptions): Promise<RelaySync
   let newestAt = known?.newestAt ?? 0;
   let until: number | undefined;
   let exhausted = false;
+  let limit = pageSize;
+  let repeatedCount = 0;
 
   for (let page = 0; page < maxPages; page++) {
-    const filter: Filter = { kinds: [SPEC_KIND], limit: pageSize };
+    const filter: Filter = { kinds: [SPEC_KIND], limit };
     if (since !== undefined) filter.since = since;
     if (until !== undefined) filter.until = until;
 
-    const events = await queryRelays([relay], filter, options);
-    const fresh = events.filter((event) => !seen.has(event.id));
-    if (fresh.length === 0) {
-      exhausted = true;
-      break;
-    }
-
+    const { events, complete } = await queryRelayPage(relay, filter, options);
+    const fresh = events.filter((event) => !seen.has(event.id)).slice(0, maxEvents - seen.size);
     for (const event of fresh) {
       seen.set(event.id, event);
       if (event.created_at > newestAt) newestAt = event.created_at;
     }
-    options.onPage?.(parseAll(fresh));
+    if (fresh.length > 0) options.onPage?.(parseAll(fresh));
 
-    // Inclusive, not `- 1`: two events sharing a timestamp across a page
-    // boundary would be lost otherwise. The repeated page is absorbed by `seen`.
-    until = Math.min(...events.map((event) => event.created_at));
-    if (seen.size >= maxEvents) break;
+    // Partial responses are useful, but cannot prove that a relay was exhausted.
+    if (!complete || seen.size >= maxEvents) break;
+    if (events.length === 0) {
+      exhausted = true;
+      break;
+    }
+
+    if (fresh.length === 0) {
+      // An inclusive page can repeat forever when many events share a second.
+      // Widen the request before advancing past that second. If the relay
+      // appears capped at the original page size, keep an unfinished cursor.
+      if (events.length >= pageSize) {
+        if (limit >= maxEvents || (repeatedCount > 0 && events.length <= repeatedCount)) break;
+        repeatedCount = events.length;
+        limit = Math.min(maxEvents, limit * 2);
+        continue;
+      }
+      // A short repeated boundary is not the end of history: ask below it.
+      // A relay silently withholding events can still defeat any limit-based walk.
+      if (until === undefined) break;
+      if (until <= (since ?? 0)) {
+        exhausted = true;
+        break;
+      }
+      until -= 1;
+      limit = pageSize;
+      repeatedCount = 0;
+      continue;
+    }
+
+    // Inclusive: events sharing a timestamp across a page boundary must not be lost.
+    const boundary = Math.min(...events.map((event) => event.created_at));
+    if (boundary !== until) {
+      limit = pageSize;
+      repeatedCount = 0;
+    }
+    until = boundary;
   }
 
   return { events: [...seen.values()], cursor: { newestAt, exhausted } };
@@ -95,9 +125,8 @@ const syncRelay = async (relay: string, options: SyncOptions): Promise<RelaySync
  * again from the top, because the hole a guard rail left is on the old side and
  * no `since` can reach it.
  *
- * A relay that cannot be reached answers an empty page rather than an error, so
- * it keeps the watermark it had earned: that watermark was true when it was
- * written, and nothing is lost by trusting it once the relay answers again.
+ * A relay that cannot be reached keeps its watermark but is marked unfinished.
+ * A future run must not skip older events just because a request timed out.
  */
 export const syncSpecs = async (options: SyncOptions = {}): Promise<SyncResult> => {
   const relays = relaySet(options.relays ?? READ_RELAYS);

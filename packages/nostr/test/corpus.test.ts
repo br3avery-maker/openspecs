@@ -70,6 +70,74 @@ afterAll(async () => {
 });
 
 describe("syncSpecs", () => {
+  it("widens a repeated full page when documents share a second", async () => {
+    const docs = [...Array.from({ length: 5 }, (_, i) => document(300 + i, 20)), document(305, 10)];
+    const relay = await startRelay(docs);
+    try {
+      const { specs, cursors } = await syncSpecs({
+        relays: [relay.url ?? ""],
+        pageSize: 2,
+      });
+      expect(found(specs)).toEqual(seeded(docs));
+      expect(cursors[key(relay)]?.exhausted).toBe(true);
+    } finally {
+      await relay.stop();
+    }
+  });
+
+  it("keeps an interrupted crawl unfinished when the relay is unreachable", async () => {
+    const gone = await startRelay(spread);
+    const url = gone.url ?? "";
+    const relayKey = key(gone);
+    await gone.stop();
+    const { cursors } = await syncSpecs({
+      relays: [url],
+      cursors: { [relayKey]: { newestAt: NEWEST, exhausted: false } },
+      timeoutMs: 500,
+    });
+    expect(cursors[relayKey]).toEqual({ newestAt: NEWEST, exhausted: false });
+  });
+
+  it("does not declare a permanently saturated boundary exhausted", async () => {
+    const docs = [
+      ...Array.from({ length: 5 }, (_, i) => document(400 + i, 20)),
+      document(405, 10),
+    ].sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id));
+    const url = "wss://fixture.example/";
+    // Deterministic relay with a hard cap of two, regardless of requested limit.
+    type PageFilter = { since?: number; until?: number; limit?: number };
+    const page = (filter?: PageFilter) =>
+      docs
+        .filter(
+          (e) =>
+            e.created_at >= (filter?.since ?? 0) && e.created_at <= (filter?.until ?? Infinity),
+        )
+        .slice(0, Math.min(2, filter?.limit ?? 2));
+    const pool = {
+      querySync: async (_relays: string[], filter: PageFilter) => page(filter),
+      ensureRelay: async () => ({
+        subscribe: (
+          [filter]: PageFilter[],
+          handlers: {
+            onevent: (event: (typeof docs)[number]) => void;
+            oneose: () => void;
+          },
+        ) => {
+          queueMicrotask(() => {
+            for (const event of page(filter)) {
+              handlers.onevent(event);
+            }
+            handlers.oneose();
+          });
+          return { close: () => {} };
+        },
+      }),
+    } as unknown as NonNullable<Parameters<typeof syncSpecs>[0]>["pool"];
+    const { specs, cursors } = await syncSpecs({ relays: [url], pageSize: 2, pool });
+    expect(specs).toHaveLength(2);
+    expect(cursors[url]?.exhausted).toBe(false);
+  });
+
   it("pages past a relay's limit rather than stopping at the first answer", async () => {
     const { specs } = await syncSpecs({ relays: [deepRelay.url ?? ""], pageSize: 10 });
     expect(found(specs)).toEqual(seeded(deep));

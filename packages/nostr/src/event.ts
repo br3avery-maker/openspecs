@@ -36,7 +36,9 @@ export const newestEvent = (
     (newest, event) =>
       event.pubkey !== pubkey || event.kind !== kind
         ? newest
-        : newest === null || event.created_at > newest.created_at
+        : newest === null ||
+            event.created_at > newest.created_at ||
+            (event.created_at === newest.created_at && event.id < newest.id)
           ? event
           : newest,
     null,
