@@ -58,3 +58,52 @@ export const queryRelays = async (
   const pool = options.pool ?? relayPool();
   return pool.querySync(relays, filter, { maxWait: options.timeoutMs ?? DEFAULT_TIMEOUT_MS });
 };
+
+/**
+ * A corpus walk must distinguish a real EOSE from a timeout or disconnect.
+ * SimplePool.querySync intentionally merges these outcomes. Use its existing
+ * connection but a shorter, independent deadline than the subscription's
+ * synthetic EOSE timer. Partial events are still useful, not proof of completion.
+ */
+export const queryRelayPage = async (
+  url: string,
+  filter: Filter,
+  options: RelayOptions = {},
+): Promise<{ events: NostrEvent[]; complete: boolean }> => {
+  const pool = options.pool ?? relayPool();
+  const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const events: NostrEvent[] = [];
+  try {
+    if (pool.allowConnectingToRelay?.(url, ["read", [filter]]) === false) {
+      return { events, complete: false };
+    }
+    const relay = await pool.ensureRelay(url, { connectionTimeout: timeout });
+    return await new Promise((resolve) => {
+      let subscription: { close: () => void } | undefined;
+      let done = false;
+      const finish = (complete: boolean, close: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (close) subscription?.close();
+        resolve({ events, complete });
+      };
+      const timer = setTimeout(() => finish(false, true), timeout);
+      try {
+        subscription = relay.subscribe([filter], {
+          onevent: (event) => {
+            if (!done) events.push(event);
+          },
+          oneose: () => finish(true, true),
+          onclose: () => finish(false, false),
+          // nostr-tools calls oneose even on its own timer. Our timer wins.
+          eoseTimeout: timeout + 1000,
+        });
+      } catch {
+        finish(false, true);
+      }
+    });
+  } catch {
+    return { events, complete: false };
+  }
+};

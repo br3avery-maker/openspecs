@@ -106,14 +106,22 @@ export const buildRelayList = (relays: Array<string | RelayEntry>): EventDraft =
 
 /** Indexers serve stale revisions of a relay list next to the live one, so the newest wins. */
 export const selectRelayLists = (events: unknown[]): Map<string, RelayList> => {
-  const newest = new Map<string, { createdAt: number; list: RelayList }>();
+  const newest = new Map<string, { createdAt: number; id: string; list: RelayList }>();
   for (const event of events) {
     const list = parseRelayList(event);
     const parsed = nostrEventSchema.safeParse(event);
     if (!list || !parsed.success) continue;
     const current = newest.get(parsed.data.pubkey);
-    if (!current || parsed.data.created_at > current.createdAt) {
-      newest.set(parsed.data.pubkey, { createdAt: parsed.data.created_at, list });
+    if (
+      !current ||
+      parsed.data.created_at > current.createdAt ||
+      (parsed.data.created_at === current.createdAt && parsed.data.id < current.id)
+    ) {
+      newest.set(parsed.data.pubkey, {
+        createdAt: parsed.data.created_at,
+        id: parsed.data.id,
+        list,
+      });
     }
   }
   return new Map([...newest].map(([pubkey, { list }]) => [pubkey, list]));
